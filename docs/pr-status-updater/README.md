@@ -17,7 +17,7 @@ python scripts/post_pr_status.py \
   --pr-url https://github.com/red-hat-data-services/odh-dashboard/pull/123 \
   --status success
 
-# Dry-run (prints gh api commands only)
+# Dry-run (runs read-only gh calls for PR head SHA; prints POST commands only)
 python scripts/post_pr_status.py \
   --pr-url https://github.com/org/repo/pull/1 \
   --status success \

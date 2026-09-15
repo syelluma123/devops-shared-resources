@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -45,6 +46,21 @@ class PullRequestRef:
     @property
     def url(self) -> str:
         return f"https://github.com/{self.owner}/{self.repo}/pull/{self.number}"
+
+
+@dataclass(frozen=True)
+class PullHeadInfo:
+    sha: str
+    status_owner: str
+    status_repo: str
+    pr_state: str
+
+
+@dataclass(frozen=True)
+class LatestCommitStatus:
+    state: str
+    description: str | None
+    target_url: str | None
 
 
 @dataclass(frozen=True)
@@ -198,11 +214,15 @@ class PRStatusUpdater:
             check=False,
         )
 
-    def run_gh(self, gh_args: Sequence[str]) -> str:
+    def run_gh(self, gh_args: Sequence[str], *, mutate: bool = False) -> str:
+        """Run gh. In dry-run mode, read-only calls execute; mutating calls are printed only."""
         command = ["gh", *gh_args]
-        if self.dry_run:
+        if self.dry_run and mutate:
             print(f"[dry-run] {' '.join(command)}")
             return ""
+
+        if self.dry_run:
+            print(f"[dry-run] {' '.join(command)}")
 
         result = self._runner(command)
         if result.returncode != 0:
@@ -210,22 +230,22 @@ class PRStatusUpdater:
             raise GhCommandError(command, result.returncode, output.strip())
         return (result.stdout or "").strip()
 
-    def get_pull_head(self, pr: PullRequestRef) -> tuple[str, str, str]:
-        """Return (head_sha, owner, repo) where owner/repo own the head commit.
+    def get_pull_head(self, pr: PullRequestRef) -> PullHeadInfo:
+        """Return head SHA and repo that owns the head commit (fork PRs).
 
-        Statuses must be posted to the head repository (fork PRs), not only the
-        repository named in the PR URL.
+        Warns when the pull request is closed but still returns head metadata.
         """
         output = self.run_gh(
             [
                 "api",
                 f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}",
                 "--jq",
-                "{sha: .head.sha, owner: .head.repo.owner.login, repo: .head.repo.name}",
+                (
+                    "{sha: .head.sha, owner: .head.repo.owner.login, "
+                    "repo: .head.repo.name, state: .state}"
+                ),
             ]
         )
-        if self.dry_run:
-            return "dry-run-sha", pr.owner, pr.repo
         if not output:
             raise RuntimeError(f"Could not resolve head for {pr.url}")
         try:
@@ -237,34 +257,37 @@ class PRStatusUpdater:
         sha = payload.get("sha")
         owner = payload.get("owner")
         repo = payload.get("repo")
-        if not sha or not owner or not repo:
+        pr_state = payload.get("state")
+        if not sha or not owner or not repo or not pr_state:
             raise RuntimeError(f"Could not resolve head for {pr.url}")
-        return str(sha), str(owner), str(repo)
+        if str(pr_state).lower() == "closed":
+            warnings.warn(
+                f"Pull request {pr.url} is closed; posting commit status anyway.",
+                stacklevel=2,
+            )
+        return PullHeadInfo(
+            sha=str(sha),
+            status_owner=str(owner),
+            status_repo=str(repo),
+            pr_state=str(pr_state),
+        )
 
     def get_head_sha(self, pr: PullRequestRef) -> str:
-        return self.get_pull_head(pr)[0]
+        return self.get_pull_head(pr).sha
 
-    def get_latest_status_state_for_context(
+    def get_latest_status_for_context(
         self,
         status_owner: str,
         status_repo: str,
         head_sha: str,
-    ) -> str | None:
-        """Return the latest GitHub state for this check context on a commit, if any."""
+    ) -> LatestCommitStatus | None:
+        """Return the latest commit status for this context on a commit, if any."""
         context_json = json.dumps(self.check_name)
-        # Exact context match (portable jq; GitHub stores the context we post).
-        jq_filter = f"[.[] | select(.context == {context_json})] | .[0].state // empty"
-        if self.dry_run:
-            self.run_gh(
-                [
-                    "api",
-                    f"repos/{status_owner}/{status_repo}/commits/{head_sha}/statuses",
-                    "--jq",
-                    jq_filter,
-                ]
-            )
-            return None
-
+        jq_filter = (
+            f"[.[] | select(.context == {context_json})] | "
+            ".[0] | {state: .state, description: .description, "
+            "target_url: .target_url} // empty"
+        )
         output = self.run_gh(
             [
                 "api",
@@ -275,8 +298,35 @@ class PRStatusUpdater:
         )
         if not output:
             return None
-        state = output.strip().lower()
-        return state if state in VALID_GITHUB_STATES else None
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError:
+            return None
+        state = str(payload.get("state", "")).strip().lower()
+        if state not in VALID_GITHUB_STATES:
+            return None
+        description = payload.get("description")
+        target_url = payload.get("target_url")
+        return LatestCommitStatus(
+            state=state,
+            description=str(description) if description is not None else None,
+            target_url=str(target_url) if target_url is not None else None,
+        )
+
+    @staticmethod
+    def _should_skip_status_update(
+        existing: LatestCommitStatus,
+        github_state: str,
+        description: str | None,
+        target_url: str | None,
+    ) -> bool:
+        if existing.state != github_state:
+            return False
+        if description is not None and (existing.description or "") != description:
+            return False
+        if target_url is not None and (existing.target_url or "") != target_url:
+            return False
+        return True
 
     def find_open_pr_urls_by_label(self, repo_slug: str, label: str) -> list[str]:
         owner, repo = normalize_repo_slug(repo_slug)
@@ -347,14 +397,16 @@ class PRStatusUpdater:
         github_state = normalize_status(state)
         description = validate_description(description)
         target_url = validate_target_url(target_url)
-        head_sha, status_owner, status_repo = self.get_pull_head(pr)
-        existing_state = self.get_latest_status_state_for_context(
-            status_owner, status_repo, head_sha
+        head = self.get_pull_head(pr)
+        existing = self.get_latest_status_for_context(
+            head.status_owner, head.status_repo, head.sha
         )
-        if existing_state == github_state:
+        if existing and self._should_skip_status_update(
+            existing, github_state, description, target_url
+        ):
             return StatusUpdateResult(
                 pr=pr,
-                head_sha=head_sha,
+                head_sha=head.sha,
                 state=github_state,
                 context=self.check_name,
                 dry_run=self.dry_run,
@@ -363,17 +415,18 @@ class PRStatusUpdater:
 
         self.run_gh(
             self.build_status_command(
-                status_owner,
-                status_repo,
-                head_sha,
+                head.status_owner,
+                head.status_repo,
+                head.sha,
                 github_state,
                 description=description,
                 target_url=target_url,
-            )
+            ),
+            mutate=True,
         )
         return StatusUpdateResult(
             pr=pr,
-            head_sha=head_sha,
+            head_sha=head.sha,
             state=github_state,
             context=self.check_name,
             dry_run=self.dry_run,

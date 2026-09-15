@@ -61,7 +61,7 @@ def test_post_status_for_pr_uses_gh_api(monkeypatch: pytest.MonkeyPatch) -> None
         result.returncode = 0
         if command[1] == "api" and command[2].endswith("/pulls/7"):
             result.stdout = (
-                '{"sha":"sha123","owner":"org","repo":"repo"}\n'
+                '{"sha":"sha123","owner":"org","repo":"repo","state":"open"}\n'
             )
         elif command[1] == "api" and "/commits/" in command[2] and command[2].endswith("/statuses"):
             result.stdout = ""
@@ -86,11 +86,30 @@ def test_post_status_for_pr_uses_gh_api(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_dry_run_prints_commands(capsys: pytest.CaptureFixture[str]) -> None:
-    updater = PRStatusUpdater(check_name="gated artifacts promoter", dry_run=True)
+    def fake_runner(command: list[str]) -> MagicMock:
+        result = MagicMock()
+        result.returncode = 0
+        if command[1] == "api" and command[2].endswith("/pulls/3"):
+            result.stdout = (
+                '{"sha":"realsha3","owner":"org","repo":"repo","state":"open"}\n'
+            )
+        elif command[1] == "api" and "/commits/" in command[2]:
+            result.stdout = ""
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(
+        check_name="gated artifacts promoter",
+        dry_run=True,
+        runner=fake_runner,
+    )
     updater.post_status_for_pr("https://github.com/org/repo/pull/3", "success")
     captured = capsys.readouterr().out
     assert "[dry-run] gh api repos/org/repo/pulls/3" in captured
-    assert "repos/org/repo/statuses/dry-run-sha" in captured
+    assert "repos/org/repo/statuses/realsha3" in captured
+    assert "dry-run-sha" not in captured
 
 
 def test_post_status_uses_head_repo_for_fork_pr() -> None:
@@ -102,7 +121,7 @@ def test_post_status_uses_head_repo_for_fork_pr() -> None:
         result.returncode = 0
         if command[1] == "api" and "/pulls/9" in command[2]:
             result.stdout = (
-                '{"sha":"forksha","owner":"contributor","repo":"repo"}\n'
+                '{"sha":"forksha","owner":"contributor","repo":"repo","state":"open"}\n'
             )
         elif command[1] == "api" and "/commits/" in command[2] and command[2].endswith("/statuses"):
             result.stdout = ""
@@ -237,7 +256,7 @@ def test_post_status_for_many_continue_on_error() -> None:
         result = MagicMock()
         if command[1] == "api" and "/pulls/1" in command[2]:
             result.returncode = 0
-            result.stdout = '{"sha":"s1","owner":"org","repo":"repo"}\n'
+            result.stdout = '{"sha":"s1","owner":"org","repo":"repo","state":"open"}\n'
         elif command[1] == "api" and "/pulls/2" in command[2]:
             result.returncode = 1
             result.stdout = ""
@@ -279,9 +298,13 @@ def test_post_status_skips_when_context_already_has_same_state() -> None:
         result.returncode = 0
         path = command[2] if len(command) > 2 else ""
         if path.endswith("/pulls/11"):
-            result.stdout = '{"sha":"sha11","owner":"org","repo":"repo"}\n'
+            result.stdout = (
+                '{"sha":"sha11","owner":"org","repo":"repo","state":"open"}\n'
+            )
         elif path.endswith("/statuses") and "/commits/" in path:
-            result.stdout = "success\n"
+            result.stdout = (
+                '{"state":"success","description":"old","target_url":null}\n'
+            )
         else:
             result.stdout = ""
         result.stderr = ""
@@ -291,7 +314,58 @@ def test_post_status_skips_when_context_already_has_same_state() -> None:
     result = updater.post_status_for_pr(
         "https://github.com/org/repo/pull/11",
         "success",
+        description="old",
     )
     assert result.skipped is True
     assert not any("POST" in str(c) for c in calls)
     assert len(calls) == 2
+
+
+def test_post_status_warns_when_pr_is_closed() -> None:
+    def fake_runner(command: list[str]) -> MagicMock:
+        result = MagicMock()
+        result.returncode = 0
+        if command[2].endswith("/pulls/20"):
+            result.stdout = (
+                '{"sha":"sha20","owner":"org","repo":"repo","state":"closed"}\n'
+            )
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="ctx", runner=fake_runner)
+    with pytest.warns(UserWarning, match="closed"):
+        updater.post_status_for_pr("https://github.com/org/repo/pull/20", "success")
+
+
+def test_post_status_updates_description_when_state_unchanged() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> MagicMock:
+        calls.append(command)
+        result = MagicMock()
+        result.returncode = 0
+        path = command[2] if len(command) > 2 else ""
+        if path.endswith("/pulls/12"):
+            result.stdout = (
+                '{"sha":"sha12","owner":"org","repo":"repo","state":"open"}\n'
+            )
+        elif path.endswith("/statuses") and "/commits/" in path:
+            result.stdout = (
+                '{"state":"success","description":"old text","target_url":null}\n'
+            )
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="gated artifacts promoter", runner=fake_runner)
+    result = updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/12",
+        "success",
+        description="new text",
+    )
+    assert result.skipped is False
+    assert any("POST" in c for c in calls)
+    assert "description=new text" in calls[-1]
