@@ -16,21 +16,22 @@ PR_URL_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$"
 )
 
+# Values sent to GitHub commit status API (POST .../statuses/{sha}).
 VALID_GITHUB_STATES = frozenset({"error", "failure", "pending", "success"})
 
 # https://docs.github.com/en/rest/commits/statuses#create-a-commit-status
 MAX_STATUS_CONTEXT_LENGTH = 255
 MAX_STATUS_DESCRIPTION_LENGTH = 140
 
-# Caller-friendly aliases used by GAP state machine (RHOAIENG-93564).
-STATUS_ALIASES = {
-    "merge-failure": "failure",
-    "build-failure": "failure",
-    "test-failure": "failure",
-    "build-pending": "pending",
-    "test-pending": "pending",
-    "build-success": "success",
+# CLI accepts check-oriented names; map to commit-status `state` (see status checks docs).
+# GAP-specific names are translated in RHOAIENG-93565 before calling this tool.
+STATUS_INPUT_ALIASES = {
+    "completed": "success",
+    "in_progress": "pending",
+    "queued": "pending",
 }
+
+ACCEPTED_STATUS_INPUTS = frozenset(VALID_GITHUB_STATES | STATUS_INPUT_ALIASES.keys())
 
 
 @dataclass(frozen=True)
@@ -173,11 +174,10 @@ def parse_pr_url(pr_url: str) -> PullRequestRef:
 
 def normalize_status(status: str) -> str:
     normalized = status.strip().lower()
-    normalized = STATUS_ALIASES.get(normalized, normalized)
-    if normalized not in VALID_GITHUB_STATES:
-        allowed = ", ".join(sorted(VALID_GITHUB_STATES | set(STATUS_ALIASES)))
+    if normalized not in ACCEPTED_STATUS_INPUTS:
+        allowed = ", ".join(sorted(ACCEPTED_STATUS_INPUTS))
         raise ValueError(f"Unsupported status '{status}'. Allowed: {allowed}")
-    return normalized
+    return STATUS_INPUT_ALIASES.get(normalized, normalized)
 
 
 def normalize_repo_slug(repo: str) -> tuple[str, str]:

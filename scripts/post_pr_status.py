@@ -36,7 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--status",
         required=True,
-        help="Status to post: success, failure, pending, error, or GAP aliases like merge-failure.",
+        help=(
+            "Status to post: completed, failure, in_progress, queued "
+            "(or commit-status values success, pending, error). "
+            "GAP aliases belong in the monitor workflow (RHOAIENG-93565)."
+        ),
     )
     parser.add_argument(
         "--pr-url",

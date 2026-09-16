@@ -30,9 +30,16 @@ def test_parse_pr_url_invalid() -> None:
         parse_pr_url("https://example.com/not-a-pr")
 
 
-def test_normalize_status_aliases() -> None:
-    assert normalize_status("merge-failure") == "failure"
-    assert normalize_status("build-pending") == "pending"
+def test_normalize_status_check_names_map_to_commit_state() -> None:
+    assert normalize_status("completed") == "success"
+    assert normalize_status("failure") == "failure"
+    assert normalize_status("in_progress") == "pending"
+    assert normalize_status("queued") == "pending"
+
+
+def test_normalize_status_rejects_gap_aliases() -> None:
+    with pytest.raises(ValueError, match="Unsupported status"):
+        normalize_status("merge-failure")
 
 
 def test_build_status_command() -> None:
