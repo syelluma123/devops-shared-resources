@@ -77,7 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print gh commands without calling the GitHub API.",
+        help=(
+            "Print POST commands only; still runs read-only gh calls "
+            "(PR head SHA, existing status) when using --pr-url."
+        ),
     )
     parser.add_argument(
         "--continue-on-error",
