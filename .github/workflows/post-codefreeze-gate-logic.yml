@@ -65,7 +65,7 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          KEYS=$(echo "$PR_BODY" | grep -oE '(RHOAIENG|RHAIENG|AIPCC)-[0-9]+' | sort -u || true)
+          KEYS=$(echo "$PR_BODY" | grep -oE '(RHOAIENG|RHAIENG|AIPCC|INFERENG)-[0-9]+' | sort -u || true)
           if [ -z "$KEYS" ]; then
             echo "::warning::No Jira issue keys found in PR description"
             echo "keys=" >> "$GITHUB_OUTPUT"
