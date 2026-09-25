@@ -5,8 +5,10 @@ Read leader state.json → classify each child PR (merge-failure vs success) →
 post the matching commit status via PRStatusUpdater → update pr-status →
 write state.json.
 
-State path (RHOAIENG-93564): gap-leaders/<trigger_id>/state.json where
-trigger_id looks like gap-<uuid>.
+State path (RHOAIENG-93564 / sync layout):
+GAP Leaders/<YYYY-MM-DD>_<trigger_id>/state.json
+where trigger_id looks like gap-<uuid>
+(e.g. GAP Leaders/2026-09-25_gap-60907cdcc8e64561aa75bc326fe22899/state.json).
 """
 
 from __future__ import annotations
@@ -43,8 +45,12 @@ DEFAULT_CHECK_NAME = "gated artifacts promoter"
 SUCCESS_PR_STATUS = "success"
 MERGE_FAILURE_PR_STATUS = "merge-failure"
 TRIGGER_ID_RE = re.compile(r"^gap-[A-Za-z0-9._-]+$")
-# Parent directory for per-trigger Leader state files (RHOAIENG-93564).
-GAP_LEADERS_DIR = "gap-leaders"
+# Parent directory for per-trigger Leader state files (sync / RHOAIENG-93564).
+GAP_LEADERS_DIR = "GAP Leaders"
+# Folder name: 2026-09-25_gap-<uuid>
+DATED_TRIGGER_DIR_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<trigger_id>gap-[A-Za-z0-9._-]+)$"
+)
 
 # GitHub mergeStateStatus values that mean the PR cannot be merged cleanly.
 CONFLICT_MERGE_STATES = frozenset({"DIRTY", "CONFLICTING"})
@@ -88,7 +94,12 @@ class MonitorResult:
 
 
 def state_path_for_trigger(trigger_id: str, *, root: Path | None = None) -> Path:
-    """Return <root>/gap-leaders/<trigger_id>/state.json (RHOAIENG-93564)."""
+    """Return state.json for a trigger id under GAP Leaders/.
+
+    Looks for ``GAP Leaders/<YYYY-MM-DD>_<trigger_id>/state.json``.
+    If several dated folders exist for the same trigger id, the latest
+    folder name (lexicographic date prefix) wins.
+    """
     tid = (trigger_id or "").strip()
     if not TRIGGER_ID_RE.match(tid):
         raise GapPrMonitorError(
@@ -96,14 +107,38 @@ def state_path_for_trigger(trigger_id: str, *, root: Path | None = None) -> Path
             "(e.g. gap-4e997b5f8c224668b51d2fc8b4677495)."
         )
     base = root if root is not None else Path(".")
-    return (base / GAP_LEADERS_DIR / tid / "state.json").resolve()
+    leaders = base / GAP_LEADERS_DIR
+    if not leaders.is_dir():
+        raise GapPrMonitorError(
+            f"State directory not found: {leaders} "
+            f"(expected {GAP_LEADERS_DIR}/<YYYY-MM-DD>_{tid}/state.json)."
+        )
+
+    matches: list[Path] = []
+    for child in sorted(leaders.iterdir()):
+        if not child.is_dir():
+            continue
+        m = DATED_TRIGGER_DIR_RE.match(child.name)
+        if not m or m.group("trigger_id") != tid:
+            continue
+        candidate = child / "state.json"
+        if candidate.is_file():
+            matches.append(candidate)
+
+    if not matches:
+        raise GapPrMonitorError(
+            f"State file not found for {tid!r} under {leaders} "
+            f"(expected {GAP_LEADERS_DIR}/<YYYY-MM-DD>_{tid}/state.json)."
+        )
+    # Date-prefixed names sort chronologically; take the newest.
+    return matches[-1].resolve()
 
 
 def extract_trigger_id_from_labels(labels: Sequence[str] | None) -> str | None:
     """Return the first gap-* label (Leader trigger id), or None.
 
-    Leader PRs are expected to carry a gap-<uuid> label that matches the
-    folder under gap-leaders/ that holds state.json (RHOAIENG-93564).
+    Leader PRs carry a gap-<uuid> label; state lives at
+    GAP Leaders/<YYYY-MM-DD>_<gap-uuid>/state.json.
     """
     for raw in labels or []:
         label = str(raw).strip()
@@ -161,14 +196,14 @@ def state_path_for_output(state_path: Path, *, repo_root: Path) -> str:
 
 
 def find_gap_state_files(root: Path) -> list[Path]:
-    """Find <root>/gap-leaders/gap-*/state.json (not arbitrary state.json)."""
+    """Find <root>/GAP Leaders/<YYYY-MM-DD>_gap-*/state.json."""
     base = root.expanduser().resolve()
     leaders = base / GAP_LEADERS_DIR
     if not leaders.is_dir():
         return []
     found: list[Path] = []
-    for path in sorted(leaders.glob("gap-*/state.json")):
-        if TRIGGER_ID_RE.match(path.parent.name):
+    for path in sorted(leaders.glob("*/state.json")):
+        if DATED_TRIGGER_DIR_RE.match(path.parent.name):
             found.append(path.resolve())
     return found
 
@@ -185,9 +220,10 @@ def resolve_state_file(
 
     Priority:
       1. Explicit ``state_file`` — manual override (workflow_dispatch / local)
-      2. Explicit ``trigger_id`` → ``gap-leaders/<trigger_id>/state.json``
+      2. Explicit ``trigger_id`` →
+         ``GAP Leaders/<YYYY-MM-DD>_<trigger_id>/state.json``
       3. ``gap-*`` label from the Leader PR → same path
-      4. Optional fallback: exactly one ``gap-leaders/gap-*/state.json``
+      4. Optional fallback: exactly one dated folder under ``GAP Leaders/``
 
     Arbitrary discovery of unrelated ``state.json`` files is not used.
     """
@@ -210,14 +246,15 @@ def resolve_state_file(
         if len(candidates) > 1:
             listed = ", ".join(str(p) for p in candidates)
             raise GapPrMonitorError(
-                "Multiple gap-leaders/gap-*/state.json files found and no "
-                f"trigger id/label was provided; refuse to guess. Candidates: {listed}"
+                f"Multiple {GAP_LEADERS_DIR}/<date>_gap-*/state.json files "
+                "found and no trigger id/label was provided; refuse to guess. "
+                f"Candidates: {listed}"
             )
 
     raise GapPrMonitorError(
         "Cannot locate state.json. Provide --state-file, or --trigger-id "
-        f"(gap-<id> → {GAP_LEADERS_DIR}/<id>/state.json), or a Leader PR "
-        "gap-* label."
+        f"(gap-<id> → {GAP_LEADERS_DIR}/<YYYY-MM-DD>_gap-<id>/state.json), "
+        "or a Leader PR gap-* label."
     )
 
 
@@ -488,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--trigger-id",
         default=None,
         metavar="ID",
-        help="Leader trigger id (resolves to gap-leaders/<id>/state.json).",
+        help="Leader trigger id (resolves to GAP Leaders/<date>_<id>/state.json).",
     )
     parser.add_argument(
         "--label",
@@ -498,7 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=(
             "Leader PR label (repeatable). A gap-* label selects "
-            "gap-leaders/<gap-id>/state.json when --trigger-id is omitted. "
+            "GAP Leaders/<date>_<gap-id>/state.json when --trigger-id is omitted. "
             "In Actions, prefer GAP_PR_LABELS instead."
         ),
     )
@@ -511,7 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-gap-dir-fallback",
         action="store_true",
         help=(
-            "If no trigger id/label, use exactly one gap-leaders/gap-*/state.json "
+            "If no trigger id/label, use exactly one GAP Leaders/<date>_gap-*/state.json "
             "under --repo-root (fail if zero or many)."
         ),
     )

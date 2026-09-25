@@ -127,7 +127,7 @@ def test_load_and_extract_pr_urls(tmp_path: Path) -> None:
 
 
 def test_save_state_creates_parent_dirs(tmp_path: Path) -> None:
-    path = tmp_path / "gap-leaders" / "gap-abc" / "state.json"
+    path = tmp_path / "GAP Leaders" / "2026-09-25_gap-abc" / "state.json"
     save_state(path, _sample_state())
     assert path.is_file()
 
@@ -207,10 +207,22 @@ def test_apply_pr_statuses_ignores_unknown_urls() -> None:
 
 
 def test_state_path_for_trigger(tmp_path: Path) -> None:
-    path = state_path_for_trigger(
-        "gap-4e997b5f8c224668b51d2fc8b4677495", root=tmp_path
-    )
-    assert path == (tmp_path / "gap-leaders" / "gap-4e997b5f8c224668b51d2fc8b4677495" / "state.json")
+    tid = "gap-4e997b5f8c224668b51d2fc8b4677495"
+    expected = tmp_path / "GAP Leaders" / f"2026-09-25_{tid}" / "state.json"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("{}\n", encoding="utf-8")
+    path = state_path_for_trigger(tid, root=tmp_path)
+    assert path == expected.resolve()
+
+
+def test_state_path_for_trigger_picks_latest_dated_folder(tmp_path: Path) -> None:
+    tid = "gap-abc123"
+    older = tmp_path / "GAP Leaders" / f"2026-09-20_{tid}" / "state.json"
+    newer = tmp_path / "GAP Leaders" / f"2026-09-25_{tid}" / "state.json"
+    for p in (older, newer):
+        p.parent.mkdir(parents=True)
+        p.write_text("{}\n", encoding="utf-8")
+    assert state_path_for_trigger(tid, root=tmp_path) == newer.resolve()
 
 
 @pytest.mark.parametrize(
@@ -231,27 +243,40 @@ def test_resolve_state_file_prefers_explicit(tmp_path: Path) -> None:
 
 
 def test_resolve_state_file_from_trigger(tmp_path: Path) -> None:
+    expected = tmp_path / "GAP Leaders" / "2026-09-25_gap-abc123" / "state.json"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("{}\n", encoding="utf-8")
     resolved = resolve_state_file(trigger_id="gap-abc123", root=tmp_path)
-    assert resolved == (tmp_path / "gap-leaders" / "gap-abc123" / "state.json").resolve()
+    assert resolved == expected.resolve()
 
 
 def test_resolve_state_file_from_gap_label(tmp_path: Path) -> None:
+    expected = (
+        tmp_path / "GAP Leaders" / "2026-09-25_gap-e2e20260923133000" / "state.json"
+    )
+    expected.parent.mkdir(parents=True)
+    expected.write_text("{}\n", encoding="utf-8")
     resolved = resolve_state_file(
         labels=["gated-artifacts-promoter", "gap-e2e20260923133000", "other"],
         root=tmp_path,
     )
-    assert resolved == (
-        tmp_path / "gap-leaders" / "gap-e2e20260923133000" / "state.json"
-    ).resolve()
+    assert resolved == expected.resolve()
 
 
 def test_resolve_state_file_trigger_id_wins_over_labels(tmp_path: Path) -> None:
+    expected = tmp_path / "GAP Leaders" / "2026-09-25_gap-from-flag" / "state.json"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("{}\n", encoding="utf-8")
+    # distractor for the label path
+    other = tmp_path / "GAP Leaders" / "2026-09-25_gap-from-label" / "state.json"
+    other.parent.mkdir(parents=True)
+    other.write_text("{}\n", encoding="utf-8")
     resolved = resolve_state_file(
         trigger_id="gap-from-flag",
         labels=["gap-from-label"],
         root=tmp_path,
     )
-    assert resolved == (tmp_path / "gap-leaders" / "gap-from-flag" / "state.json").resolve()
+    assert resolved == expected.resolve()
 
 
 def test_extract_trigger_id_from_labels() -> None:
@@ -312,7 +337,7 @@ def test_resolve_inputs_for_cli_reads_env_when_cli_empty(
 def test_append_github_output_and_relative_path(tmp_path: Path) -> None:
     out = tmp_path / "github_output"
     root = tmp_path / "repo"
-    state = root / "gap-leaders" / "gap-x" / "state.json"
+    state = root / "GAP Leaders" / "2026-09-25_gap-x" / "state.json"
     state.parent.mkdir(parents=True)
     state.write_text("{}\n", encoding="utf-8")
     append_github_output(
@@ -320,7 +345,7 @@ def test_append_github_output_and_relative_path(tmp_path: Path) -> None:
         state_path_for_output(state, repo_root=root),
         output_file=str(out),
     )
-    assert out.read_text(encoding="utf-8") == "state_path=gap-leaders/gap-x/state.json\n"
+    assert out.read_text(encoding="utf-8") == "state_path=GAP Leaders/2026-09-25_gap-x/state.json\n"
 
 
 def test_main_writes_github_output_from_ci_env(
@@ -328,7 +353,7 @@ def test_main_writes_github_output_from_ci_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "leader"
-    state = root / "gap-leaders" / "gap-cienv" / "state.json"
+    state = root / "GAP Leaders" / "2026-09-25_gap-cienv" / "state.json"
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps(_sample_state()), encoding="utf-8")
     out = tmp_path / "out"
@@ -350,13 +375,13 @@ def test_main_writes_github_output_from_ci_env(
         "scripts.gap_pr_monitor.run_stage1_monitor", fake_run
     )
     assert main(["--repo-root", str(root), "--dry-run"]) == 0
-    assert "state_path=gap-leaders/gap-cienv/state.json" in out.read_text(
+    assert "state_path=GAP Leaders/2026-09-25_gap-cienv/state.json" in out.read_text(
         encoding="utf-8"
     )
 
 
 def test_resolve_state_file_gap_dir_fallback_exactly_one(tmp_path: Path) -> None:
-    only = tmp_path / "gap-leaders" / "gap-onlyone" / "state.json"
+    only = tmp_path / "GAP Leaders" / "2026-09-25_gap-onlyone" / "state.json"
     only.parent.mkdir(parents=True)
     only.write_text("{}\n", encoding="utf-8")
     # distractor at repo root must NOT be picked
@@ -370,10 +395,10 @@ def test_resolve_state_file_gap_dir_fallback_exactly_one(tmp_path: Path) -> None
 
 def test_resolve_state_file_gap_dir_fallback_rejects_many(tmp_path: Path) -> None:
     for name in ("gap-one", "gap-two"):
-        p = tmp_path / "gap-leaders" / name / "state.json"
+        p = tmp_path / "GAP Leaders" / f"2026-09-25_{name}" / "state.json"
         p.parent.mkdir(parents=True)
         p.write_text("{}\n", encoding="utf-8")
-    with pytest.raises(GapPrMonitorError, match="Multiple gap-leaders"):
+    with pytest.raises(GapPrMonitorError, match="Multiple GAP Leaders"):
         resolve_state_file(root=tmp_path, allow_gap_dir_fallback=True)
 
 
@@ -861,6 +886,9 @@ def test_main_with_trigger_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    expected = tmp_path / "GAP Leaders" / "2026-09-25_gap-abc123" / "state.json"
+    expected.parent.mkdir(parents=True)
+    expected.write_text(json.dumps(_sample_state()), encoding="utf-8")
     seen: dict[str, Path] = {}
 
     def fake_run(state_path, **kwargs):
@@ -877,7 +905,7 @@ def test_main_with_trigger_id(
     monkeypatch.setattr("scripts.gap_pr_monitor.run_stage1_monitor", fake_run)
     code = main(["--trigger-id", "gap-abc123", "--repo-root", str(tmp_path)])
     assert code == 0
-    assert seen["path"] == (tmp_path / "gap-leaders" / "gap-abc123" / "state.json").resolve()
+    assert seen["path"] == expected.resolve()
 
 
 def test_main_reports_monitor_error(

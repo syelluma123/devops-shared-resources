@@ -31,13 +31,13 @@ If `mergeable` is `UNKNOWN` / null (GitHub still computing), the script waits br
 Layout:
 
 ```text
-gap-leaders/
-  gap-<uuid>/
+GAP Leaders/
+  <YYYY-MM-DD>_gap-<uuid>/
     state.json
 ```
 
 The Leader PR’s **`gap-<uuid>` label** is the trigger id. The matching state
-file is **`gap-leaders/<trigger_id>/state.json`**.
+file is **`GAP Leaders/<YYYY-MM-DD>_<trigger_id>/state.json`**.
 
 ### Automatic (Leader PR / Actions)
 
@@ -69,19 +69,19 @@ python scripts/gap_pr_monitor.py --label gap-4e997b5f8c224668b51d2fc8b4677495
 
 # explicit path override
 python scripts/gap_pr_monitor.py \
-  --state-file gap-leaders/gap-4e997b5f8c224668b51d2fc8b4677495/state.json
+  --state-file GAP Leaders/2026-09-25_gap-4e997b5f8c224668b51d2fc8b4677495/state.json
 ```
 
 Resolution order (`resolve_state_file`, after merging CLI + `GAP_*` env):
 
 1. `--state-file` / `GAP_STATE_FILE` (manual override)
-2. `--trigger-id` / `GAP_TRIGGER_ID` → `gap-leaders/<id>/state.json`
+2. `--trigger-id` / `GAP_TRIGGER_ID` → `GAP Leaders/<YYYY-MM-DD>_<id>/state.json`
 3. `--label gap-*` / `GAP_PR_LABELS` → same
-4. Optional `--allow-gap-dir-fallback`: exactly one `gap-leaders/gap-*/state.json`
+4. Optional `--allow-gap-dir-fallback`: exactly one `GAP Leaders/<date>_gap-*/state.json`
 
 ## Local run
 
 ```bash
 python scripts/gap_pr_monitor.py --trigger-id gap-e2e20260923133000
-python scripts/gap_pr_monitor.py --state-file gap-leaders/gap-e2e…/state.json --dry-run
+python scripts/gap_pr_monitor.py --state-file GAP Leaders/2026-09-25_gap-e2e…/state.json --dry-run
 ```
