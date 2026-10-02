@@ -88,7 +88,7 @@ def test_run_sync_entry_creates_pr(mock_prepare, mock_pr_creator, mock_push, git
     _commit(target, "README.md", "main\n", "main change")
     run(["git", "checkout", "stable"], cwd=target)
 
-    mock_prepare.return_value = (target, "main")
+    mock_prepare.return_value = (target, "main", "sync-branch")
 
     pr_instance = MagicMock()
     pr_instance.find_open_pr_by_label.return_value = None
@@ -98,6 +98,7 @@ def test_run_sync_entry_creates_pr(mock_prepare, mock_pr_creator, mock_push, git
         branch="sync-branch",
         created=True,
         updated=False,
+        merged=False,
     )
     mock_pr_creator.return_value = pr_instance
 
@@ -124,6 +125,10 @@ def test_run_sync_entry_creates_pr(mock_prepare, mock_pr_creator, mock_push, git
     outcome = run_sync_entry(entry, token="token", dry_run=False)
     assert outcome.pr_url == "https://github.com/example/repo/pull/1"
     pr_instance.create_or_update_tracking_pr.assert_called_once()
+    assert (
+        pr_instance.create_or_update_tracking_pr.call_args.kwargs["merge_when_ready"]
+        is False
+    )
     mock_push.assert_called_once()
 
 
@@ -151,6 +156,7 @@ def test_run_sync_entry_creates_source_pr(mock_pr_creator, mock_collect, git_rep
         branch="main",
         created=True,
         updated=False,
+        merged=False,
     )
     mock_pr_creator.return_value = pr_instance
 
@@ -180,6 +186,32 @@ def test_run_sync_entry_creates_source_pr(mock_pr_creator, mock_collect, git_rep
     pr_instance.create_or_update_tracking_pr.assert_called_once()
     assert pr_instance.create_or_update_tracking_pr.call_args.kwargs["head_branch"] == "main"
     assert pr_instance.create_or_update_tracking_pr.call_args.kwargs["delete_branch_on_merge"] is False
+
+
+def test_source_pr_rejects_ignore_files(git_repo_factory) -> None:
+    target = git_repo_factory("target")
+    entry = {
+        "sync_type": "pr",
+        "src": {"url": str(target), "branch": "main"},
+        "dest": {"url": str(target), "branch": "stable"},
+        "ignore_files": [".tekton/*"],
+        "pr": {
+            "branch": None,
+            "head_strategy": "source",
+            "tracking_label": None,
+            "labels": [],
+            "automerge": False,
+            "title": None,
+            "body": None,
+            "reviewers": [],
+        },
+        "merge_args": [],
+        "fetch_args": [],
+        "push_args": [],
+    }
+
+    with pytest.raises(ConfigError, match="cannot be used with ignore-files"):
+        run_sync_entry(entry, token="token", dry_run=False)
 
 
 def test_main_with_config_file_and_only_filter(tmp_path: Path) -> None:
