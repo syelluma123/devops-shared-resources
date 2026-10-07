@@ -100,7 +100,7 @@ See `docs/sync-branches/consumer-setup.md` for infra-repo config format and how 
 When using `sync-type: pr`, choose how the pull request is opened:
 
 - `sync-branch` (default): merge the source branch into a temporary branch, push it, and open a PR into the target branch. Supports `ignore-files` and pre-resolved merge conflicts.
-- `source`: open the PR directly from the source branch into the target branch (e.g. `main` → `stable`). Requires the same repository and does not support `ignore-files`.
+- `source`: open the PR directly from the source branch into the target branch (e.g. `main` → `stable`). Requires the same repository and cannot be combined with `ignore-files`.
 
 CLI:
 
