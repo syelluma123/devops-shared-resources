@@ -65,7 +65,7 @@ git:
 
 Per-entry overrides are also supported: `source-branch`, `target-branch`, `tracking-label`, `sync-type`, `pr-head`.
 
-Use `pr-head: source` when you want `main` → `stable` directly instead of a temporary sync branch. This requires the same repository and cannot be combined with `ignore-files`.
+Use `pr-head: source` when you want `main` → `stable` directly instead of a temporary sync branch. This requires the same repository and cannot be combined with `ignore-files`. Use `pr-head: sync-branch` when you need `ignore-files`.
 
 The native `syncs:` format from `docs/sync-branches/README.md` is still supported.
 

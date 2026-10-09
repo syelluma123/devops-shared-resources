@@ -22,6 +22,7 @@ class PRResult:
     branch: str
     created: bool
     updated: bool
+    merged: bool = False
 
 
 class PRCreator:
@@ -68,6 +69,42 @@ class PRCreator:
                 return pull
         return None
 
+    def find_open_pr_by_head(
+        self,
+        repo_url: str,
+        *,
+        head_branch: str,
+        base_branch: str,
+    ) -> dict[str, Any] | None:
+        """Return the open PR for this head→base pair, if any.
+
+        GitHub allows only one open PR per head branch in a repo, so a
+        main→stable sync must update that PR instead of creating another.
+        """
+        owner, repo = parse_github_repo(repo_url)
+        pulls = self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls",
+            params={
+                "state": "open",
+                "base": base_branch,
+                "head": f"{owner}:{head_branch}",
+                "per_page": 10,
+            },
+        )
+        if pulls:
+            return pulls[0]
+        # Fallback without owner prefix (some API contexts).
+        pulls = self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls",
+            params={"state": "open", "base": base_branch, "per_page": 100},
+        )
+        for pull in pulls:
+            if pull.get("head", {}).get("ref") == head_branch:
+                return pull
+        return None
+
     def ensure_delete_branch_on_merge(self, repo_url: str) -> None:
         """Enable repository setting to delete head branches after PR merge."""
         owner, repo = parse_github_repo(repo_url)
@@ -90,6 +127,7 @@ class PRCreator:
         labels: list[str] | None = None,
         reviewers: list[str] | None = None,
         automerge: bool = False,
+        merge_when_ready: bool = False,
         draft: bool = False,
         delete_branch_on_merge: bool = True,
     ) -> PRResult:
@@ -111,8 +149,13 @@ class PRCreator:
             self.add_labels(repo_url, number=number, labels=labels)
         if reviewers:
             self.request_reviewers(repo_url, number=number, reviewers=reviewers)
+        merged = False
         if automerge:
-            self.enable_automerge(repo_url, number=number)
+            merged = self.enable_automerge(
+                repo_url,
+                number=number,
+                merge_when_ready=merge_when_ready,
+            )
 
         return PRResult(
             number=number,
@@ -120,6 +163,7 @@ class PRCreator:
             branch=head_branch,
             created=True,
             updated=False,
+            merged=merged,
         )
 
     def update_pull_request(
@@ -151,9 +195,17 @@ class PRCreator:
             json={"reviewers": reviewers},
         )
 
-    def enable_automerge(self, repo_url: str, *, number: int) -> None:
+    def enable_automerge(
+        self,
+        repo_url: str,
+        *,
+        number: int,
+        merge_when_ready: bool = False,
+    ) -> bool:
+        """Enable auto-merge, or merge now when repository rules already allow it."""
         owner, repo = parse_github_repo(repo_url)
         pull = self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}")
+        head_sha = pull["head"]["sha"]
         node_id = pull["node_id"]
         mutation = """
         mutation($pullRequestId: ID!) {
@@ -166,11 +218,45 @@ class PRCreator:
             "https://api.github.com/graphql",
             json={"query": mutation, "variables": {"pullRequestId": node_id}},
         )
+        context = f" for {owner}/{repo} pull request #{number}"
         if response.status_code >= 400:
-            raise RuntimeError(f"Failed to enable automerge: {response.text}")
+            raise RuntimeError(f"Failed to enable automerge{context}: {response.text}")
         payload = response.json()
-        if payload.get("errors"):
-            raise RuntimeError(f"Failed to enable automerge: {json.dumps(payload['errors'])}")
+        errors = payload.get("errors") or []
+        if errors:
+            retry_as_merge = merge_when_ready and any(
+                error.get("type") == "UNPROCESSABLE" for error in errors
+            )
+            if retry_as_merge:
+                current = self._request(
+                    "GET", f"/repos/{owner}/{repo}/pulls/{number}"
+                )
+                merge_state = str(current.get("mergeable_state") or "").lower()
+                ready = current.get("mergeable") is True and merge_state in {
+                    "clean",
+                    "unstable",
+                }
+                if ready:
+                    if current["head"]["sha"] != head_sha:
+                        raise RuntimeError(
+                            f"Refusing to merge {owner}/{repo} pull request #{number}: "
+                            "head commit changed while enabling automerge"
+                        )
+                    result = self._request(
+                        "PUT",
+                        f"/repos/{owner}/{repo}/pulls/{number}/merge",
+                        json={"merge_method": "merge", "sha": head_sha},
+                    )
+                    if not result.get("merged"):
+                        raise RuntimeError(
+                            f"Failed to merge {owner}/{repo} pull request #{number}: "
+                            f"{result.get('message', 'GitHub did not merge the pull request')}"
+                        )
+                    return True
+            raise RuntimeError(
+                f"Failed to enable automerge{context}: {json.dumps(errors)}"
+            )
+        return False
 
     def create_or_update_tracking_pr(
         self,
@@ -184,14 +270,21 @@ class PRCreator:
         labels: list[str] | None = None,
         reviewers: list[str] | None = None,
         automerge: bool = False,
+        merge_when_ready: bool = False,
         delete_branch_on_merge: bool = True,
     ) -> PRResult:
         labels = list(labels or [])
         if tracking_label and tracking_label not in labels:
             labels.append(tracking_label)
 
-        existing = None
-        if tracking_label:
+        # Prefer an existing PR with the same head→base (e.g. master→stable).
+        # GitHub rejects a second open PR from the same head (422).
+        existing = self.find_open_pr_by_head(
+            repo_url,
+            head_branch=head_branch,
+            base_branch=base_branch,
+        )
+        if existing is None and tracking_label:
             existing = self.find_open_pr_by_label(
                 repo_url,
                 base_branch=base_branch,
@@ -206,27 +299,67 @@ class PRCreator:
                 self.add_labels(repo_url, number=number, labels=labels)
             if reviewers:
                 self.request_reviewers(repo_url, number=number, reviewers=reviewers)
+            merged = False
             if automerge:
-                self.enable_automerge(repo_url, number=number)
+                merged = self.enable_automerge(
+                    repo_url,
+                    number=number,
+                    merge_when_ready=merge_when_ready,
+                )
             return PRResult(
                 number=number,
                 url=existing["html_url"],
                 branch=existing_branch,
                 created=False,
                 updated=True,
+                merged=merged,
             )
 
-        return self.create_pull_request(
-            repo_url,
-            title=title,
-            body=body,
-            head_branch=head_branch,
-            base_branch=base_branch,
-            labels=labels,
-            reviewers=reviewers,
-            automerge=automerge,
-            delete_branch_on_merge=delete_branch_on_merge,
-        )
+        try:
+            return self.create_pull_request(
+                repo_url,
+                title=title,
+                body=body,
+                head_branch=head_branch,
+                base_branch=base_branch,
+                labels=labels,
+                reviewers=reviewers,
+                automerge=automerge,
+                merge_when_ready=merge_when_ready,
+                delete_branch_on_merge=delete_branch_on_merge,
+            )
+        except RuntimeError as exc:
+            # Race or missed lookup: reuse the open head→base PR.
+            if "422" not in str(exc) or "already exists" not in str(exc).lower():
+                raise
+            existing = self.find_open_pr_by_head(
+                repo_url,
+                head_branch=head_branch,
+                base_branch=base_branch,
+            )
+            if existing is None:
+                raise
+            number = existing["number"]
+            self.update_pull_request(repo_url, number=number, title=title, body=body)
+            if labels:
+                self.add_labels(repo_url, number=number, labels=labels)
+            if reviewers:
+                self.request_reviewers(repo_url, number=number, reviewers=reviewers)
+            merged = False
+            if automerge:
+                merged = self.enable_automerge(
+                    repo_url,
+                    number=number,
+                    merge_when_ready=merge_when_ready,
+                )
+            return PRResult(
+                number=number,
+                url=existing["html_url"],
+                branch=existing["head"]["ref"],
+                created=False,
+                updated=True,
+                merged=merged,
+            )
 
 
 def format_default_pr_title(

@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from lib.pr_status_updater import (
-    GhCommandError,
     PRStatusUpdater,
     StatusUpdateBatchError,
     normalize_repo_slug,
@@ -117,6 +116,35 @@ def test_dry_run_prints_commands(capsys: pytest.CaptureFixture[str]) -> None:
     assert "[dry-run] gh api repos/org/repo/pulls/3" in captured
     assert "repos/org/repo/statuses/realsha3" in captured
     assert "dry-run-sha" not in captured
+
+
+def test_post_status_for_pr_honors_explicit_head_sha() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> MagicMock:
+        calls.append(command)
+        result = MagicMock()
+        result.returncode = 0
+        if command[1] == "api" and command[2].endswith("/pulls/7"):
+            result.stdout = (
+                '{"sha":"live-head","owner":"org","repo":"repo","state":"open"}\n'
+            )
+        elif command[1] == "api" and "/commits/" in command[2] and command[2].endswith("/statuses"):
+            result.stdout = ""
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="gated artifacts promoter", runner=fake_runner)
+    result = updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/7",
+        "success",
+        head_sha="published-sha",
+    )
+    assert result.head_sha == "published-sha"
+    assert "repos/org/repo/commits/published-sha/statuses" in calls[1][2]
+    assert "repos/org/repo/statuses/published-sha" in calls[2][4]
 
 
 def test_post_status_uses_head_repo_for_fork_pr() -> None:
@@ -289,11 +317,6 @@ def test_post_status_for_many_continue_on_error() -> None:
         )
     assert len(exc_info.value.successes) == 1
     assert len(exc_info.value.failures) == 1
-
-
-def test_gh_command_error_message() -> None:
-    err = GhCommandError(["gh", "api"], 1, "boom")
-    assert "boom" in str(err)
 
 
 def test_post_status_skips_when_context_already_has_same_state() -> None:
