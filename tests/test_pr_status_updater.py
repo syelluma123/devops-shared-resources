@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from lib.pr_status_updater import (
-    GhCommandError,
     PRStatusUpdater,
     StatusUpdateBatchError,
     normalize_repo_slug,
@@ -119,6 +118,35 @@ def test_dry_run_prints_commands(capsys: pytest.CaptureFixture[str]) -> None:
     assert "dry-run-sha" not in captured
 
 
+def test_post_status_for_pr_honors_explicit_head_sha() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> MagicMock:
+        calls.append(command)
+        result = MagicMock()
+        result.returncode = 0
+        if command[1] == "api" and command[2].endswith("/pulls/7"):
+            result.stdout = (
+                '{"sha":"live-head","owner":"org","repo":"repo","state":"open"}\n'
+            )
+        elif command[1] == "api" and "/commits/" in command[2] and command[2].endswith("/statuses"):
+            result.stdout = ""
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="gated artifacts promoter", runner=fake_runner)
+    result = updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/7",
+        "success",
+        head_sha="published-sha",
+    )
+    assert result.head_sha == "published-sha"
+    assert "repos/org/repo/commits/published-sha/statuses" in calls[1][2]
+    assert "repos/org/repo/statuses/published-sha" in calls[2][4]
+
+
 def test_post_status_uses_head_repo_for_fork_pr() -> None:
     calls: list[list[str]] = []
 
@@ -138,7 +166,11 @@ def test_post_status_uses_head_repo_for_fork_pr() -> None:
         return result
 
     updater = PRStatusUpdater(check_name="ctx", runner=fake_runner)
-    updater.post_status_for_pr("https://github.com/org/repo/pull/9", "success")
+    updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/9",
+        "success",
+        head_sha="forksha",
+    )
     assert "repos/contributor/repo/statuses/forksha" in calls[2][4]
 
 
@@ -291,11 +323,6 @@ def test_post_status_for_many_continue_on_error() -> None:
     assert len(exc_info.value.failures) == 1
 
 
-def test_gh_command_error_message() -> None:
-    err = GhCommandError(["gh", "api"], 1, "boom")
-    assert "boom" in str(err)
-
-
 def test_post_status_skips_when_context_already_has_same_state() -> None:
     calls: list[list[str]] = []
 
@@ -344,6 +371,98 @@ def test_post_status_warns_when_pr_is_closed() -> None:
     updater = PRStatusUpdater(check_name="ctx", runner=fake_runner)
     with pytest.warns(UserWarning, match="closed"):
         updater.post_status_for_pr("https://github.com/org/repo/pull/20", "success")
+
+
+def test_post_status_pins_the_post_to_the_evaluated_sha() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> MagicMock:
+        calls.append(command)
+        result = MagicMock()
+        result.returncode = 0
+        path = command[2] if len(command) > 2 else ""
+        if path.endswith("/pulls/7"):
+            result.stdout = (
+                '{"sha":"sha123","owner":"org","repo":"repo","state":"open"}\n'
+            )
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="gated artifacts promoter", runner=fake_runner)
+    result = updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/7",
+        "success",
+        description="GAP",
+        head_sha="sha123",
+    )
+    assert result.deferred is False
+    assert result.head_sha == "sha123"
+    assert calls[1][2] == "repos/org/repo/commits/sha123/statuses"
+    assert "repos/org/repo/statuses/sha123" in calls[2]
+
+
+def test_post_status_defers_when_the_head_moved() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> MagicMock:
+        calls.append(command)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = (
+            '{"sha":"sha-new","owner":"org","repo":"repo","state":"open"}\n'
+        )
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="gated artifacts promoter", runner=fake_runner)
+    result = updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/7",
+        "success",
+        description="GAP",
+        head_sha="sha-old",
+        defer_if_head_moved=True,
+    )
+    assert result.deferred is True
+    assert result.skipped is False
+    assert result.head_sha == "sha-old"
+    assert len(calls) == 1
+    assert not any("POST" in command or "statuses/" in " ".join(command) for command in calls)
+
+
+def test_post_status_skips_when_the_pinned_sha_already_matches() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> MagicMock:
+        calls.append(command)
+        result = MagicMock()
+        result.returncode = 0
+        path = command[2] if len(command) > 2 else ""
+        if path.endswith("/pulls/11"):
+            result.stdout = (
+                '{"sha":"sha11","owner":"org","repo":"repo","state":"open"}\n'
+            )
+        elif path.endswith("/statuses") and "/commits/sha11/" in path:
+            result.stdout = (
+                '{"state":"success","description":"old","target_url":null}\n'
+            )
+        else:
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    updater = PRStatusUpdater(check_name="gated artifacts promoter", runner=fake_runner)
+    result = updater.post_status_for_pr(
+        "https://github.com/org/repo/pull/11",
+        "success",
+        description="old",
+        head_sha="sha11",
+    )
+    assert result.skipped is True
+    assert result.deferred is False
+    assert result.head_sha == "sha11"
+    assert not any("POST" in command for command in calls)
 
 
 def test_post_status_updates_description_when_state_unchanged() -> None:

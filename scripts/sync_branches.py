@@ -194,7 +194,8 @@ def _validate_source_pr_head(entry: dict[str, Any]) -> None:
         )
     if entry["ignore_files"]:
         raise ConfigError(
-            "pr head strategy 'source' cannot be used with ignore-files; use 'sync-branch' instead."
+            "pr head strategy 'source' cannot be used with ignore-files; "
+            "use 'sync-branch' when you need ignore-files."
         )
 
 
@@ -258,9 +259,14 @@ def _create_or_update_pr(
         labels=entry["pr"]["labels"],
         reviewers=entry["pr"]["reviewers"],
         automerge=entry["pr"]["automerge"],
+        merge_when_ready=entry["pr"].get("merge_when_ready", False),
         delete_branch_on_merge=delete_branch_on_merge,
     )
-    action = "Updated" if pr_result.updated else "Created"
+    action = (
+        "Merged"
+        if pr_result.merged
+        else ("Updated" if pr_result.updated else "Created")
+    )
     message = f"{action} pull request #{pr_result.number}"
     if conflict_files:
         message += " (contains merge conflicts)"
@@ -315,7 +321,7 @@ def _prepare_worktree(
         fetch_remote(workdir, "origin", refspec=entry["src"]["branch"])
         source_ref = f"origin/{entry['src']['branch']}"
 
-    return workdir, source_ref
+    return workdir, source_ref, branch_to_use
 
 
 def run_sync_entry(
@@ -381,7 +387,9 @@ def run_sync_entry(
             )
 
         work_branch = target["branch"] if sync_type == "commit-merge" else pr_branch
-        workdir, source_ref = _prepare_worktree(entry, token=token, work_branch=work_branch)
+        workdir, source_ref, work_branch = _prepare_worktree(
+            entry, token=token, work_branch=work_branch
+        )
         target_ref = resolve_branch_ref(workdir, target["branch"])
         commits_to_sync = list_commits_between(workdir, target_ref, source_ref)
 
