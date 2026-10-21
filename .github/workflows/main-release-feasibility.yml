@@ -1,0 +1,89 @@
+name: Main-to-release feasibility
+
+on:
+  # Filters limit ordinary runs in this source repository. Ruleset workflow
+  # runs ignore event filters and use the ruleset's repository/branch targets.
+  pull_request:
+    branches: [stable]
+  merge_group:
+    branches: [stable]
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Select release sync inputs
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    outputs:
+      check: ${{ steps.inputs.outputs.check }}
+      matrix: ${{ steps.inputs.outputs.matrix }}
+    steps:
+      - name: Checkout shared resources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: red-hat-data-services/devops-shared-resources
+          ref: ${{ github.workflow_sha }}
+          path: shared-resources
+          persist-credentials: false
+
+      - name: Create read-only infra token
+        id: infra-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RHDS_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RHDS_CI_APP_PRIVATE_KEY }}
+          owner: red-hat-data-services
+          repositories: rhods-devops-infra
+          permission-contents: read
+
+      - name: Checkout release configuration
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: red-hat-data-services/rhods-devops-infra
+          ref: main
+          path: infra
+          sparse-checkout: src/config
+          token: ${{ steps.infra-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+
+      - name: Select component and releases
+        id: inputs
+        env:
+          COMPONENT_REPOSITORY: ${{ github.repository }}
+        run: |
+          uv run --python 3.12 --no-project \
+            --with-requirements shared-resources/requirements.txt \
+            python shared-resources/scripts/prepare_main_release_dry_run_inputs.py \
+            "$COMPONENT_REPOSITORY" \
+            infra/src/config/main-release-source-map.yaml \
+            infra/src/config/releases.yaml
+
+  main-release-feasibility:
+    name: main-release-feasibility (${{ matrix.downstream_branch }})
+    needs: setup
+    if: needs.setup.outputs.check == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Dry-run main-to-release sync
+        id: sync
+        # Requires sync-git-branches@main with dry_run support (PR #3).
+        uses: red-hat-data-services/sync-git-branches@main
+        with:
+          upstream_repo: ${{ matrix.upstream_repo }}
+          upstream_branch: ${{ matrix.upstream_branch }}
+          downstream_repo: ${{ matrix.downstream_repo }}
+          downstream_branch: ${{ matrix.downstream_branch }}
+          token: ${{ github.token }}
+          ignore_files: ${{ matrix.ignore_files }}
+          merge_args: ${{ matrix.merge_args }}
+          spawn_logs: ${{ matrix.spawn_logs }}
+          dry_run: ${{ matrix.dry_run }}

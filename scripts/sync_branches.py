@@ -31,6 +31,7 @@ from lib.git_utils import (
     is_local_path,
     list_commits_between,
     normalize_repo_url,
+    remote_branch_exists,
     resolve_branch_ref,
     push_branch,
     run_git,
@@ -185,6 +186,13 @@ def _uses_source_pr_head(entry: dict[str, Any]) -> bool:
     return entry["sync_type"] == "pr" and entry["pr"]["head_strategy"] == "source"
 
 
+def _target_branch_missing(entry: dict[str, Any], *, token: str | None) -> bool:
+    """Return whether a PR sync has no target branch to open against."""
+    if entry["sync_type"] != "pr":
+        return False
+    return not remote_branch_exists(entry["dest"]["url"], entry["dest"]["branch"], token=token)
+
+
 def _validate_source_pr_head(entry: dict[str, Any]) -> None:
     source_url = normalize_repo_url(entry["src"]["url"])
     target_url = normalize_repo_url(entry["dest"]["url"])
@@ -194,7 +202,8 @@ def _validate_source_pr_head(entry: dict[str, Any]) -> None:
         )
     if entry["ignore_files"]:
         raise ConfigError(
-            "pr head strategy 'source' cannot be used with ignore-files; use 'sync-branch' instead."
+            "pr head strategy 'source' cannot be used with ignore-files; "
+            "use 'sync-branch' when you need ignore-files."
         )
 
 
@@ -258,9 +267,14 @@ def _create_or_update_pr(
         labels=entry["pr"]["labels"],
         reviewers=entry["pr"]["reviewers"],
         automerge=entry["pr"]["automerge"],
+        merge_when_ready=entry["pr"].get("merge_when_ready", False),
         delete_branch_on_merge=delete_branch_on_merge,
     )
-    action = "Updated" if pr_result.updated else "Created"
+    action = (
+        "Merged"
+        if pr_result.merged
+        else ("Updated" if pr_result.updated else "Created")
+    )
     message = f"{action} pull request #{pr_result.number}"
     if conflict_files:
         message += " (contains merge conflicts)"
@@ -315,7 +329,7 @@ def _prepare_worktree(
         fetch_remote(workdir, "origin", refspec=entry["src"]["branch"])
         source_ref = f"origin/{entry['src']['branch']}"
 
-    return workdir, source_ref
+    return workdir, source_ref, branch_to_use
 
 
 def run_sync_entry(
@@ -332,6 +346,11 @@ def run_sync_entry(
 
     if not dry_run:
         _require_github_token(entry, token)
+
+    # A newly onboarded component has no stable branch yet. Create it from
+    # the source tip. An existing target stays on the PR path.
+    if _target_branch_missing(entry, token=token):
+        sync_type = "push"
 
     if dry_run:
         pr_head = source["branch"] if _uses_source_pr_head(entry) else pr_branch
@@ -351,7 +370,7 @@ def run_sync_entry(
 
     workdir: Path | None = None
     try:
-        if _uses_source_pr_head(entry):
+        if sync_type == "pr" and _uses_source_pr_head(entry):
             _validate_source_pr_head(entry)
             assert token is not None
             workdir, commits_to_sync = _collect_sync_commits(entry, token=token)
@@ -381,7 +400,9 @@ def run_sync_entry(
             )
 
         work_branch = target["branch"] if sync_type == "commit-merge" else pr_branch
-        workdir, source_ref = _prepare_worktree(entry, token=token, work_branch=work_branch)
+        workdir, source_ref, work_branch = _prepare_worktree(
+            entry, token=token, work_branch=work_branch
+        )
         target_ref = resolve_branch_ref(workdir, target["branch"])
         commits_to_sync = list_commits_between(workdir, target_ref, source_ref)
 
