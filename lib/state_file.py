@@ -29,7 +29,7 @@ PR_STATUSES = frozenset(
 
 # Leader-run conclusion (RHOAIENG-97052 / RHAI-10942). Absent while in progress.
 # ``early-gate-triggered`` = children done, Early Gate asked for; final
-# success|failure is written by gap_early_gate_results from the Leader EG comment.
+# success|failure is written later by the EG monitor (out of this ticket).
 OVERALL_STATUS_SUCCESS = "success"
 OVERALL_STATUS_FAILURE = "failure"
 OVERALL_STATUS_EARLY_GATE_TRIGGERED = "early-gate-triggered"
